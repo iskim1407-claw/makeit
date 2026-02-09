@@ -57,7 +57,7 @@ ${context || prompt}
 요구사항에 맞는 완전한 Next.js 앱 코드를 JSON 형식으로 생성해주세요.`
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-3-5-sonnet-20241022',
       max_tokens: 8192,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],
