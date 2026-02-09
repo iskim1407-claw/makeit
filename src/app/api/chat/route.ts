@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import OpenAI from 'openai'
+import Anthropic from '@anthropic-ai/sdk'
 
 const SYSTEM_PROMPT = `당신은 Makeit의 AI 어시스턴트입니다. 사용자가 원하는 웹 앱을 설명하면, 요구사항을 명확히 파악하고 구현 계획을 세웁니다.
 
@@ -31,30 +31,28 @@ export async function POST(request: NextRequest) {
   try {
     const { messages } = await request.json()
 
-    if (!process.env.OPENAI_API_KEY) {
+    if (!process.env.ANTHROPIC_API_KEY) {
       return NextResponse.json(
-        { error: 'OPENAI_API_KEY not configured' },
+        { error: 'ANTHROPIC_API_KEY not configured' },
         { status: 500 }
       )
     }
 
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
+    const anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
     })
 
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...messages.map((m: { role: string; content: string }) => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-        })),
-      ],
+    const response = await anthropic.messages.create({
+      model: 'claude-3-5-sonnet-20241022',
       max_tokens: 1024,
+      system: SYSTEM_PROMPT,
+      messages: messages.map((m: { role: string; content: string }) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      })),
     })
 
-    const text = response.choices[0]?.message?.content || ''
+    const text = response.content[0].type === 'text' ? response.content[0].text : ''
 
     return NextResponse.json({ message: text })
   } catch (error) {
