@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import OpenAI from 'openai'
 
 const SYSTEM_PROMPT = `당신은 Makeit의 AI 어시스턴트입니다. 사용자가 원하는 웹 앱을 설명하면, 요구사항을 명확히 파악하고 구현 계획을 세웁니다.
 
@@ -26,72 +27,34 @@ const SYSTEM_PROMPT = `당신은 Makeit의 AI 어시스턴트입니다. 사용�
 준비되면 "생성하기" 버튼을 눌러주세요!
 ---`
 
-async function chatWithOllama(messages: { role: string; content: string }[]) {
-  const ollamaUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434'
-  const model = process.env.OLLAMA_MODEL || 'llama3.2'
-  
-  const response = await fetch(`${ollamaUrl}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        ...messages.map(m => ({ role: m.role, content: m.content }))
-      ],
-      stream: false,
-    }),
-  })
-
-  if (!response.ok) {
-    throw new Error(`Ollama error: ${response.status}`)
-  }
-
-  const data = await response.json()
-  return data.message?.content || ''
-}
-
-async function chatWithAnthropic(messages: { role: string; content: string }[]) {
-  const Anthropic = (await import('@anthropic-ai/sdk')).default
-  const anthropic = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY,
-  })
-
-  const response = await anthropic.messages.create({
-    model: 'claude-3-5-sonnet-20241022',
-    max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    messages: messages.map(m => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    })),
-  })
-
-  const content = response.content[0]
-  return content.type === 'text' ? content.text : ''
-}
-
 export async function POST(request: NextRequest) {
   try {
     const { messages } = await request.json()
 
-    let text: string
-
-    // Try Ollama first if configured, otherwise use Anthropic
-    if (process.env.OLLAMA_BASE_URL || !process.env.ANTHROPIC_API_KEY) {
-      try {
-        text = await chatWithOllama(messages)
-      } catch (ollamaError) {
-        // Fallback to Anthropic if Ollama fails and key exists
-        if (process.env.ANTHROPIC_API_KEY) {
-          text = await chatWithAnthropic(messages)
-        } else {
-          throw ollamaError
-        }
-      }
-    } else {
-      text = await chatWithAnthropic(messages)
+    if (!process.env.OPENAI_API_KEY) {
+      return NextResponse.json(
+        { error: 'OPENAI_API_KEY not configured' },
+        { status: 500 }
+      )
     }
+
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    })
+
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...messages.map((m: { role: string; content: string }) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        })),
+      ],
+      max_tokens: 1024,
+    })
+
+    const text = response.choices[0]?.message?.content || ''
 
     return NextResponse.json({ message: text })
   } catch (error) {

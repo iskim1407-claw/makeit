@@ -1,9 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-})
+import OpenAI from 'openai'
 
 const SYSTEM_PROMPT = `당신은 전문 Next.js 개발자입니다. 사용자의 요구사항에 맞는 완전한 웹 앱 코드를 생성합니다.
 
@@ -38,12 +34,16 @@ export async function POST(request: NextRequest) {
   try {
     const { prompt, conversationHistory } = await request.json()
 
-    if (!process.env.ANTHROPIC_API_KEY) {
+    if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json(
-        { error: 'ANTHROPIC_API_KEY not configured' },
+        { error: 'OPENAI_API_KEY not configured' },
         { status: 500 }
       )
     }
+
+    const openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    })
 
     // Build context from conversation
     const context = conversationHistory
@@ -56,15 +56,16 @@ ${context || prompt}
 
 요구사항에 맞는 완전한 Next.js 앱 코드를 JSON 형식으로 생성해주세요.`
 
-    const response = await anthropic.messages.create({
-      model: 'claude-3-5-sonnet-20241022',
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: userPrompt },
+      ],
       max_tokens: 8192,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: userPrompt }],
     })
 
-    const content = response.content[0]
-    const text = content.type === 'text' ? content.text : ''
+    const text = response.choices[0]?.message?.content || ''
 
     // Extract JSON from response
     const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/)
