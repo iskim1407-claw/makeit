@@ -137,7 +137,6 @@ export default function SignupPage() {
                 </svg>
                 GitHub로 계속하기
               </button>
-{/* Google OAuth 준비중
               <button 
                 onClick={() => handleOAuth('google')}
                 className="w-full flex items-center justify-center gap-3 px-4 py-3 bg-slate-900 border border-slate-700 rounded-lg text-white hover:bg-slate-800 transition"
@@ -150,7 +149,6 @@ export default function SignupPage() {
                 </svg>
                 Google로 계속하기
               </button>
-*/}
             </div>
           </div>
 
