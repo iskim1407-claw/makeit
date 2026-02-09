@@ -1,7 +1,7 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { useState, useRef, useEffect, useCallback, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { createClient } from '@/lib/supabase'
 
@@ -17,8 +17,31 @@ type GeneratedProject = {
   files: { path: string; content: string }[]
 } | null
 
+type ConnectionStatus = {
+  github: boolean
+  vercel: boolean
+}
+
+// Suspense wrapper for useSearchParams
 export default function DashboardPage() {
+  return (
+    <Suspense fallback={<DashboardLoading />}>
+      <DashboardContent />
+    </Suspense>
+  )
+}
+
+function DashboardLoading() {
+  return (
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+      <div className="animate-spin w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full"></div>
+    </div>
+  )
+}
+
+function DashboardContent() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [user, setUser] = useState<{ email: string } | null>(null)
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -39,7 +62,27 @@ export default function DashboardPage() {
     github?: { url: string }
     vercel?: { url: string | null }
   } | null>(null)
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>({
+    github: false,
+    vercel: false,
+  })
+  const [isLoadingStatus, setIsLoadingStatus] = useState(true)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  // 토큰 연결 상태 조회
+  const fetchConnectionStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/tokens')
+      if (res.ok) {
+        const data = await res.json()
+        setConnectionStatus(data.connected)
+      }
+    } catch (error) {
+      console.error('Failed to fetch connection status:', error)
+    } finally {
+      setIsLoadingStatus(false)
+    }
+  }, [])
 
   useEffect(() => {
     const supabase = createClient()
@@ -48,9 +91,49 @@ export default function DashboardPage() {
         router.push('/login')
       } else {
         setUser({ email: user.email || '' })
+        fetchConnectionStatus()
       }
     })
-  }, [router])
+  }, [router, fetchConnectionStatus])
+
+  // URL 파라미터로 성공/에러 메시지 처리
+  useEffect(() => {
+    const success = searchParams.get('success')
+    const error = searchParams.get('error')
+
+    if (success === 'vercel_connected') {
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        role: 'assistant',
+        content: '✅ Vercel 계정이 연결되었습니다! 이제 프로젝트를 배포할 수 있어요.',
+        timestamp: new Date(),
+      }])
+      fetchConnectionStatus()
+      // URL 파라미터 제거
+      router.replace('/dashboard')
+    }
+
+    if (error) {
+      const errorMessages: Record<string, string> = {
+        vercel_auth_failed: 'Vercel 인증에 실패했습니다.',
+        missing_params: '필요한 정보가 누락되었습니다.',
+        state_expired: '인증 세션이 만료되었습니다. 다시 시도해주세요.',
+        invalid_state: '잘못된 인증 요청입니다.',
+        user_mismatch: '사용자 정보가 일치하지 않습니다.',
+        vercel_not_configured: 'Vercel OAuth가 설정되지 않았습니다.',
+        token_exchange_failed: '토큰 교환에 실패했습니다.',
+        token_save_failed: '토큰 저장에 실패했습니다.',
+        vercel_auth_error: 'Vercel 인증 중 오류가 발생했습니다.',
+      }
+      setMessages(prev => [...prev, {
+        id: Date.now().toString(),
+        role: 'assistant',
+        content: `❌ ${errorMessages[error] || '오류가 발생했습니다.'}`,
+        timestamp: new Date(),
+      }])
+      router.replace('/dashboard')
+    }
+  }, [searchParams, router, fetchConnectionStatus])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -126,12 +209,26 @@ export default function DashboardPage() {
       const data = await res.json()
       if (data.files) {
         setGeneratedProject(data)
+        
+        const canDeploy = connectionStatus.github && connectionStatus.vercel
+        let deployMessage = `✅ **${data.projectName}** 생성 완료!\n\n📁 ${data.files.length}개 파일 생성됨\n\n`
+        
+        if (canDeploy) {
+          deployMessage += '🚀 "배포하기" 버튼을 눌러 바로 배포하세요!'
+        } else {
+          deployMessage += '⚠️ 배포하려면 '
+          if (!connectionStatus.github) deployMessage += 'GitHub '
+          if (!connectionStatus.github && !connectionStatus.vercel) deployMessage += '및 '
+          if (!connectionStatus.vercel) deployMessage += 'Vercel '
+          deployMessage += '연결이 필요합니다.'
+        }
+        
         setMessages((prev) => [
           ...prev,
           {
             id: Date.now().toString(),
             role: 'assistant',
-            content: `✅ **${data.projectName}** 생성 완료!\n\n📁 ${data.files.length}개 파일 생성됨\n\n배포하시려면 설정에서 GitHub/Vercel 토큰을 입력하고 "배포하기" 버튼을 눌러주세요!`,
+            content: deployMessage,
             timestamp: new Date(),
           },
         ])
@@ -153,7 +250,7 @@ export default function DashboardPage() {
     }
   }
 
-  const handleDeploy = async (githubToken: string, vercelToken: string) => {
+  const handleDeploy = async () => {
     if (!generatedProject) return
 
     setIsDeploying(true)
@@ -164,8 +261,6 @@ export default function DashboardPage() {
         body: JSON.stringify({
           projectName: generatedProject.projectName,
           files: generatedProject.files,
-          githubToken,
-          vercelToken,
         }),
       })
 
@@ -196,7 +291,6 @@ export default function DashboardPage() {
       ])
     } finally {
       setIsDeploying(false)
-      setShowSettings(false)
     }
   }
 
@@ -221,6 +315,31 @@ export default function DashboardPage() {
     await supabase.auth.signOut()
     router.push('/')
   }
+
+  const handleConnectVercel = () => {
+    window.location.href = '/api/auth/vercel'
+  }
+
+  const handleDisconnect = async (provider: 'github' | 'vercel') => {
+    try {
+      const res = await fetch(`/api/tokens?provider=${provider}`, {
+        method: 'DELETE',
+      })
+      if (res.ok) {
+        fetchConnectionStatus()
+        setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          role: 'assistant',
+          content: `${provider === 'github' ? 'GitHub' : 'Vercel'} 연결이 해제되었습니다.`,
+          timestamp: new Date(),
+        }])
+      }
+    } catch (error) {
+      console.error('Failed to disconnect:', error)
+    }
+  }
+
+  const canDeploy = connectionStatus.github && connectionStatus.vercel
 
   if (!user) {
     return (
@@ -259,6 +378,64 @@ export default function DashboardPage() {
             <span>+</span>
             <span>새 프로젝트</span>
           </button>
+
+          {/* 연결 상태 */}
+          <div className="mb-4 p-3 bg-slate-700/50 rounded-lg space-y-2">
+            <div className="text-sm text-gray-400 mb-2">연결 상태</div>
+            
+            {isLoadingStatus ? (
+              <div className="text-xs text-gray-500">로딩 중...</div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className={connectionStatus.github ? 'text-green-400' : 'text-gray-500'}>
+                      {connectionStatus.github ? '✅' : '⬜'}
+                    </span>
+                    <span className="text-sm text-gray-300">GitHub</span>
+                  </div>
+                  {connectionStatus.github && (
+                    <button
+                      onClick={() => handleDisconnect('github')}
+                      className="text-xs text-gray-500 hover:text-red-400"
+                    >
+                      해제
+                    </button>
+                  )}
+                </div>
+                
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className={connectionStatus.vercel ? 'text-green-400' : 'text-gray-500'}>
+                      {connectionStatus.vercel ? '✅' : '⬜'}
+                    </span>
+                    <span className="text-sm text-gray-300">Vercel</span>
+                  </div>
+                  {connectionStatus.vercel ? (
+                    <button
+                      onClick={() => handleDisconnect('vercel')}
+                      className="text-xs text-gray-500 hover:text-red-400"
+                    >
+                      해제
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleConnectVercel}
+                      className="text-xs text-purple-400 hover:text-purple-300"
+                    >
+                      연결
+                    </button>
+                  )}
+                </div>
+
+                {!connectionStatus.github && (
+                  <p className="text-xs text-amber-400 mt-2">
+                    💡 GitHub 연결은 로그아웃 후 다시 로그인하세요
+                  </p>
+                )}
+              </>
+            )}
+          </div>
 
           {generatedProject && (
             <div className="mb-4 p-3 bg-slate-700/50 rounded-lg">
@@ -320,9 +497,10 @@ export default function DashboardPage() {
           <div className="flex items-center gap-3">
             {generatedProject && !deployResult && (
               <button
-                onClick={() => setShowSettings(true)}
-                disabled={isDeploying}
-                className="px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm rounded-lg transition disabled:opacity-50"
+                onClick={handleDeploy}
+                disabled={isDeploying || !canDeploy}
+                title={!canDeploy ? 'GitHub과 Vercel을 모두 연결해주세요' : ''}
+                className="px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isDeploying ? '배포 중...' : '🚀 배포하기'}
               </button>
@@ -436,9 +614,9 @@ export default function DashboardPage() {
       {showSettings && (
         <SettingsModal
           onClose={() => setShowSettings(false)}
-          onDeploy={handleDeploy}
-          canDeploy={!!generatedProject && !deployResult}
-          isDeploying={isDeploying}
+          connectionStatus={connectionStatus}
+          onConnectVercel={handleConnectVercel}
+          onDisconnect={handleDisconnect}
         />
       )}
     </div>
@@ -447,18 +625,15 @@ export default function DashboardPage() {
 
 function SettingsModal({
   onClose,
-  onDeploy,
-  canDeploy,
-  isDeploying,
+  connectionStatus,
+  onConnectVercel,
+  onDisconnect,
 }: {
   onClose: () => void
-  onDeploy: (githubToken: string, vercelToken: string) => void
-  canDeploy: boolean
-  isDeploying: boolean
+  connectionStatus: ConnectionStatus
+  onConnectVercel: () => void
+  onDisconnect: (provider: 'github' | 'vercel') => void
 }) {
-  const [githubToken, setGithubToken] = useState('')
-  const [vercelToken, setVercelToken] = useState('')
-
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
       <div className="bg-slate-800 rounded-2xl border border-slate-700 w-full max-w-lg">
@@ -470,72 +645,108 @@ function SettingsModal({
         </div>
 
         <div className="p-6 space-y-6">
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              GitHub Personal Access Token
-            </label>
-            <input
-              type="password"
-              value={githubToken}
-              onChange={(e) => setGithubToken(e.target.value)}
-              className="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-600"
-              placeholder="ghp_xxxxxxxxxxxx"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              <a
-                href="https://github.com/settings/tokens/new?scopes=repo&description=Makeit"
-                target="_blank"
-                className="text-purple-400 hover:underline"
+          {/* GitHub 연결 상태 */}
+          <div className="p-4 bg-slate-900/50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">🐙</span>
+                <div>
+                  <h3 className="font-medium text-white">GitHub</h3>
+                  <p className="text-xs text-gray-400">코드를 저장할 리포지토리</p>
+                </div>
+              </div>
+              {connectionStatus.github ? (
+                <span className="px-3 py-1 bg-green-600/20 text-green-400 text-sm rounded-full">
+                  ✓ 연결됨
+                </span>
+              ) : (
+                <span className="px-3 py-1 bg-gray-600/20 text-gray-400 text-sm rounded-full">
+                  미연결
+                </span>
+              )}
+            </div>
+            {connectionStatus.github ? (
+              <button
+                onClick={() => onDisconnect('github')}
+                className="text-xs text-red-400 hover:text-red-300"
               >
-                GitHub에서 토큰 생성하기 → (repo 권한 필요)
-              </a>
-            </p>
+                연결 해제
+              </button>
+            ) : (
+              <p className="text-xs text-amber-400">
+                💡 GitHub 연결은 로그아웃 후 다시 로그인하면 자동으로 연결됩니다
+              </p>
+            )}
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              Vercel Access Token
-            </label>
-            <input
-              type="password"
-              value={vercelToken}
-              onChange={(e) => setVercelToken(e.target.value)}
-              className="w-full px-4 py-3 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-600"
-              placeholder="xxxxxxxxxxxxxxxx"
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              <a
-                href="https://vercel.com/account/tokens"
-                target="_blank"
-                className="text-purple-400 hover:underline"
+          {/* Vercel 연결 상태 */}
+          <div className="p-4 bg-slate-900/50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">▲</span>
+                <div>
+                  <h3 className="font-medium text-white">Vercel</h3>
+                  <p className="text-xs text-gray-400">앱을 배포할 플랫폼</p>
+                </div>
+              </div>
+              {connectionStatus.vercel ? (
+                <span className="px-3 py-1 bg-green-600/20 text-green-400 text-sm rounded-full">
+                  ✓ 연결됨
+                </span>
+              ) : (
+                <span className="px-3 py-1 bg-gray-600/20 text-gray-400 text-sm rounded-full">
+                  미연결
+                </span>
+              )}
+            </div>
+            {connectionStatus.vercel ? (
+              <button
+                onClick={() => onDisconnect('vercel')}
+                className="text-xs text-red-400 hover:text-red-300"
               >
-                Vercel에서 토큰 생성하기 →
-              </a>
-            </p>
+                연결 해제
+              </button>
+            ) : (
+              <button
+                onClick={onConnectVercel}
+                className="px-4 py-2 bg-white text-black text-sm font-medium rounded-lg hover:bg-gray-100 transition"
+              >
+                Vercel 연결하기 →
+              </button>
+            )}
           </div>
 
           <div className="bg-slate-900/50 rounded-lg p-4">
             <h3 className="text-sm font-medium text-white mb-2">🔒 보안 안내</h3>
             <p className="text-xs text-gray-400">
-              토큰은 브라우저에만 저장되고 서버에 전달 후 즉시 삭제됩니다. 절대 다른 용도로 사용하지
-              않습니다.
+              OAuth를 통해 연결된 토큰은 암호화되어 안전하게 저장됩니다. 
+              언제든지 연결을 해제할 수 있으며, 해제 시 저장된 토큰이 삭제됩니다.
+            </p>
+          </div>
+
+          <div className="bg-purple-900/20 border border-purple-700/50 rounded-lg p-4">
+            <h3 className="text-sm font-medium text-purple-300 mb-2">🚀 배포하려면</h3>
+            <p className="text-xs text-gray-300">
+              GitHub과 Vercel 모두 연결되어야 프로젝트를 배포할 수 있습니다.
+              {connectionStatus.github && connectionStatus.vercel ? (
+                <span className="block mt-2 text-green-400">✅ 모든 연결 완료! 바로 배포할 수 있어요.</span>
+              ) : (
+                <span className="block mt-2 text-amber-400">
+                  {!connectionStatus.github && '• GitHub 연결 필요\n'}
+                  {!connectionStatus.vercel && '• Vercel 연결 필요'}
+                </span>
+              )}
             </p>
           </div>
         </div>
 
-        <div className="p-6 border-t border-slate-700 flex justify-end gap-3">
-          <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white transition">
+        <div className="p-6 border-t border-slate-700 flex justify-end">
+          <button 
+            onClick={onClose} 
+            className="px-4 py-2 text-gray-300 hover:text-white transition"
+          >
             닫기
           </button>
-          {canDeploy && (
-            <button
-              onClick={() => onDeploy(githubToken, vercelToken)}
-              disabled={!githubToken || !vercelToken || isDeploying}
-              className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition disabled:opacity-50"
-            >
-              {isDeploying ? '배포 중...' : '🚀 배포하기'}
-            </button>
-          )}
         </div>
       </div>
     </div>

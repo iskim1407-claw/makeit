@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createServerSupabaseClient } from '@/lib/supabase-server'
+import { getToken } from '@/lib/tokens'
 
 interface FileData {
   path: string
@@ -8,17 +10,46 @@ interface FileData {
 interface DeployRequest {
   projectName: string
   files: FileData[]
-  githubToken: string
-  vercelToken: string
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const { projectName, files, githubToken, vercelToken }: DeployRequest = await request.json()
-
-    if (!githubToken || !vercelToken) {
+    // 인증 확인
+    const supabase = await createServerSupabaseClient()
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
+    
+    if (authError || !user) {
       return NextResponse.json(
-        { error: 'GitHub and Vercel tokens required' },
+        { error: 'Unauthorized. Please log in.' },
+        { status: 401 }
+      )
+    }
+
+    // DB에서 토큰 조회
+    const [githubToken, vercelToken] = await Promise.all([
+      getToken(supabase, user.id, 'github'),
+      getToken(supabase, user.id, 'vercel'),
+    ])
+
+    if (!githubToken) {
+      return NextResponse.json(
+        { error: 'GitHub not connected. Please re-login with GitHub.' },
+        { status: 400 }
+      )
+    }
+
+    if (!vercelToken) {
+      return NextResponse.json(
+        { error: 'Vercel not connected. Please connect your Vercel account.' },
+        { status: 400 }
+      )
+    }
+
+    const { projectName, files }: DeployRequest = await request.json()
+
+    if (!projectName || !files?.length) {
+      return NextResponse.json(
+        { error: 'Project name and files required' },
         { status: 400 }
       )
     }
@@ -29,7 +60,7 @@ export async function POST(request: NextRequest) {
     const createRepoRes = await fetch('https://api.github.com/user/repos', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${githubToken}`,
+        Authorization: `Bearer ${githubToken.access_token}`,
         'Content-Type': 'application/json',
         Accept: 'application/vnd.github.v3+json',
       },
@@ -41,21 +72,35 @@ export async function POST(request: NextRequest) {
       }),
     })
 
+    let owner: string
+    let repoData: { id?: number; owner?: { login: string } }
+
     if (!createRepoRes.ok) {
       const error = await createRepoRes.json()
       // Check if repo already exists
       if (error.errors?.[0]?.message?.includes('already exists')) {
-        // Continue with existing repo
+        // Get existing repo info
+        owner = await getGitHubUser(githubToken.access_token)
+        const existingRepoRes = await fetch(
+          `https://api.github.com/repos/${owner}/${repoName}`,
+          {
+            headers: {
+              Authorization: `Bearer ${githubToken.access_token}`,
+              Accept: 'application/vnd.github.v3+json',
+            },
+          }
+        )
+        repoData = await existingRepoRes.json()
       } else {
         return NextResponse.json(
           { error: `GitHub error: ${error.message}` },
           { status: 400 }
         )
       }
+    } else {
+      repoData = await createRepoRes.json()
+      owner = repoData.owner?.login || (await getGitHubUser(githubToken.access_token))
     }
-
-    const repoData = await createRepoRes.json()
-    const owner = repoData.owner?.login || (await getGitHubUser(githubToken))
 
     // Step 2: Get default branch SHA
     await new Promise(resolve => setTimeout(resolve, 2000)) // Wait for repo init
@@ -64,7 +109,7 @@ export async function POST(request: NextRequest) {
       `https://api.github.com/repos/${owner}/${repoName}/git/refs/heads/main`,
       {
         headers: {
-          Authorization: `Bearer ${githubToken}`,
+          Authorization: `Bearer ${githubToken.access_token}`,
           Accept: 'application/vnd.github.v3+json',
         },
       }
@@ -76,7 +121,7 @@ export async function POST(request: NextRequest) {
       baseSha = refData.object.sha
     } else {
       // Create initial commit if no main branch
-      baseSha = await createInitialCommit(owner, repoName, githubToken)
+      baseSha = await createInitialCommit(owner, repoName, githubToken.access_token)
     }
 
     // Step 3: Create blobs for all files
@@ -86,7 +131,7 @@ export async function POST(request: NextRequest) {
         {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${githubToken}`,
+            Authorization: `Bearer ${githubToken.access_token}`,
             'Content-Type': 'application/json',
             Accept: 'application/vnd.github.v3+json',
           },
@@ -134,7 +179,7 @@ export async function POST(request: NextRequest) {
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${githubToken}`,
+          Authorization: `Bearer ${githubToken.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -152,7 +197,7 @@ export async function POST(request: NextRequest) {
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${githubToken}`,
+          Authorization: `Bearer ${githubToken.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -169,7 +214,7 @@ export async function POST(request: NextRequest) {
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${githubToken}`,
+          Authorization: `Bearer ${githubToken.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -187,7 +232,7 @@ export async function POST(request: NextRequest) {
       {
         method: 'PATCH',
         headers: {
-          Authorization: `Bearer ${githubToken}`,
+          Authorization: `Bearer ${githubToken.access_token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -200,7 +245,7 @@ export async function POST(request: NextRequest) {
     const vercelRes = await fetch('https://api.vercel.com/v13/deployments', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${vercelToken}`,
+        Authorization: `Bearer ${vercelToken.access_token}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
