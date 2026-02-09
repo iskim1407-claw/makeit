@@ -40,6 +40,8 @@ export default function LoginPage() {
       provider,
       options: {
         redirectTo: `${window.location.origin}/auth/callback`,
+        // GitHub에서 repo 권한 요청 (자동 배포용)
+        ...(provider === 'github' && { scopes: 'repo' }),
       },
     })
 
