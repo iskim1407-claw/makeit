@@ -1,7 +1,9 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { createClient } from '@/lib/supabase'
 
 type Message = {
   id: string
@@ -10,7 +12,14 @@ type Message = {
   timestamp: Date
 }
 
+type GeneratedProject = {
+  projectName: string
+  files: { path: string; content: string }[]
+} | null
+
 export default function DashboardPage() {
+  const router = useRouter()
+  const [user, setUser] = useState<{ email: string } | null>(null)
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
@@ -23,7 +32,25 @@ export default function DashboardPage() {
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [generatedProject, setGeneratedProject] = useState<GeneratedProject>(null)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [isDeploying, setIsDeploying] = useState(false)
+  const [deployResult, setDeployResult] = useState<{
+    github?: { url: string }
+    vercel?: { url: string | null }
+  } | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const supabase = createClient()
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) {
+        router.push('/login')
+      } else {
+        setUser({ email: user.email || '' })
+      }
+    })
+  }, [router])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -43,30 +70,142 @@ export default function DashboardPage() {
       timestamp: new Date(),
     }
 
-    setMessages((prev) => [...prev, userMessage])
+    const newMessages = [...messages, userMessage]
+    setMessages(newMessages)
     setInput('')
     setIsProcessing(true)
 
-    // Simulate AI response
-    setTimeout(() => {
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: newMessages
+            .filter((m) => m.id !== '1')
+            .map((m) => ({ role: m.role, content: m.content })),
+        }),
+      })
+
+      const data = await res.json()
+
       const aiMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: `좋아요! "${userMessage.content}"를 만들어 드릴게요.\n\n먼저 GitHub와 Vercel 연결이 필요해요. 설정에서 토큰을 입력해주세요! ⚙️`,
+        content: data.message || data.error || '응답을 생성하지 못했어요.',
         timestamp: new Date(),
       }
       setMessages((prev) => [...prev, aiMessage])
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: '죄송해요, 오류가 발생했어요. 다시 시도해주세요.',
+          timestamp: new Date(),
+        },
+      ])
+    } finally {
       setIsProcessing(false)
-    }, 1500)
+    }
+  }
+
+  const handleGenerate = async () => {
+    setIsGenerating(true)
+    try {
+      const res = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          conversationHistory: messages
+            .filter((m) => m.id !== '1')
+            .map((m) => ({ role: m.role, content: m.content })),
+        }),
+      })
+
+      const data = await res.json()
+      if (data.files) {
+        setGeneratedProject(data)
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            role: 'assistant',
+            content: `✅ **${data.projectName}** 생성 완료!\n\n📁 ${data.files.length}개 파일 생성됨\n\n배포하시려면 설정에서 GitHub/Vercel 토큰을 입력하고 "배포하기" 버튼을 눌러주세요!`,
+            timestamp: new Date(),
+          },
+        ])
+      } else {
+        throw new Error(data.error || 'Generation failed')
+      }
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: 'assistant',
+          content: '코드 생성 중 오류가 발생했어요. 다시 시도해주세요.',
+          timestamp: new Date(),
+        },
+      ])
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const handleDeploy = async (githubToken: string, vercelToken: string) => {
+    if (!generatedProject) return
+
+    setIsDeploying(true)
+    try {
+      const res = await fetch('/api/deploy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectName: generatedProject.projectName,
+          files: generatedProject.files,
+          githubToken,
+          vercelToken,
+        }),
+      })
+
+      const data = await res.json()
+      if (data.success) {
+        setDeployResult(data)
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now().toString(),
+            role: 'assistant',
+            content: `🚀 **배포 완료!**\n\n📦 GitHub: ${data.github.url}\n🌐 Vercel: ${data.vercel.url || '설정 필요'}\n\n앱이 배포되었어요! 잠시 후 URL에서 확인하세요.`,
+            timestamp: new Date(),
+          },
+        ])
+      } else {
+        throw new Error(data.error)
+      }
+    } catch (e) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now().toString(),
+          role: 'assistant',
+          content: `배포 중 오류: ${e instanceof Error ? e.message : '알 수 없는 오류'}`,
+          timestamp: new Date(),
+        },
+      ])
+    } finally {
+      setIsDeploying(false)
+      setShowSettings(false)
+    }
   }
 
   const handleVoice = () => {
     if (isRecording) {
       setIsRecording(false)
-      // TODO: Stop recording and process
     } else {
       setIsRecording(true)
-      // TODO: Start recording
+      // TODO: Implement voice recording with Web Speech API
     }
   }
 
@@ -75,6 +214,20 @@ export default function DashboardPage() {
       e.preventDefault()
       handleSend()
     }
+  }
+
+  const handleLogout = async () => {
+    const supabase = createClient()
+    await supabase.auth.signOut()
+    router.push('/')
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+        <div className="animate-spin w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full"></div>
+      </div>
+    )
   }
 
   return (
@@ -88,29 +241,71 @@ export default function DashboardPage() {
         </div>
 
         <div className="flex-1 p-4">
-          <button className="w-full flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition mb-4">
+          <button
+            onClick={() => {
+              setMessages([
+                {
+                  id: '1',
+                  role: 'assistant',
+                  content: '안녕하세요! 👋 어떤 앱을 만들어 드릴까요?',
+                  timestamp: new Date(),
+                },
+              ])
+              setGeneratedProject(null)
+              setDeployResult(null)
+            }}
+            className="w-full flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition mb-4"
+          >
             <span>+</span>
             <span>새 프로젝트</span>
           </button>
 
-          <div className="text-sm text-gray-400 mb-2">최근 프로젝트</div>
-          <div className="space-y-1">
-            <div className="px-4 py-2 text-gray-300 hover:bg-slate-700 rounded-lg cursor-pointer">
-              📝 투두 앱
+          {generatedProject && (
+            <div className="mb-4 p-3 bg-slate-700/50 rounded-lg">
+              <div className="text-sm text-gray-400 mb-1">생성된 프로젝트</div>
+              <div className="text-white font-medium">{generatedProject.projectName}</div>
+              <div className="text-xs text-gray-500">{generatedProject.files.length}개 파일</div>
             </div>
-            <div className="px-4 py-2 text-gray-300 hover:bg-slate-700 rounded-lg cursor-pointer">
-              🛒 쇼핑몰
+          )}
+
+          {deployResult && (
+            <div className="mb-4 p-3 bg-green-900/30 border border-green-700 rounded-lg">
+              <div className="text-sm text-green-400 mb-2">✅ 배포됨</div>
+              <a
+                href={deployResult.github?.url}
+                target="_blank"
+                className="text-xs text-blue-400 hover:underline block"
+              >
+                GitHub →
+              </a>
+              {deployResult.vercel?.url && (
+                <a
+                  href={deployResult.vercel.url}
+                  target="_blank"
+                  className="text-xs text-blue-400 hover:underline block mt-1"
+                >
+                  Live Site →
+                </a>
+              )}
             </div>
-          </div>
+          )}
         </div>
 
-        <div className="p-4 border-t border-slate-700">
+        <div className="p-4 border-t border-slate-700 space-y-2">
+          <div className="text-xs text-gray-500 truncate">{user.email}</div>
           <button
             onClick={() => setShowSettings(true)}
             className="w-full flex items-center gap-2 px-4 py-2 text-gray-300 hover:bg-slate-700 rounded-lg transition"
           >
             <span>⚙️</span>
             <span>설정</span>
+          </button>
+          <button
+            onClick={handleLogout}
+            className="w-full flex items-center gap-2 px-4 py-2 text-gray-400 hover:bg-slate-700 hover:text-red-400 rounded-lg transition"
+          >
+            <span>🚪</span>
+            <span>로그아웃</span>
           </button>
         </div>
       </div>
@@ -119,10 +314,28 @@ export default function DashboardPage() {
       <div className="flex-1 flex flex-col">
         {/* Header */}
         <div className="h-14 border-b border-slate-700 flex items-center justify-between px-6">
-          <h1 className="text-white font-semibold">새 프로젝트</h1>
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-green-500"></span>
-            <span className="text-sm text-gray-400">연결됨</span>
+          <h1 className="text-white font-semibold">
+            {generatedProject ? generatedProject.projectName : '새 프로젝트'}
+          </h1>
+          <div className="flex items-center gap-3">
+            {generatedProject && !deployResult && (
+              <button
+                onClick={() => setShowSettings(true)}
+                disabled={isDeploying}
+                className="px-4 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm rounded-lg transition disabled:opacity-50"
+              >
+                {isDeploying ? '배포 중...' : '🚀 배포하기'}
+              </button>
+            )}
+            {messages.length > 2 && !generatedProject && (
+              <button
+                onClick={handleGenerate}
+                disabled={isGenerating}
+                className="px-4 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-sm rounded-lg transition disabled:opacity-50"
+              >
+                {isGenerating ? '생성 중...' : '✨ 생성하기'}
+              </button>
+            )}
           </div>
         </div>
 
@@ -162,8 +375,14 @@ export default function DashboardPage() {
               <div className="bg-slate-800 text-gray-100 px-4 py-3 rounded-2xl rounded-bl-none">
                 <div className="flex gap-1">
                   <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"></span>
-                  <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></span>
-                  <span className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></span>
+                  <span
+                    className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"
+                    style={{ animationDelay: '0.1s' }}
+                  ></span>
+                  <span
+                    className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"
+                    style={{ animationDelay: '0.2s' }}
+                  ></span>
                 </div>
               </div>
             </div>
@@ -200,38 +419,45 @@ export default function DashboardPage() {
                 className="text-purple-400 hover:text-purple-300 disabled:text-gray-600 transition"
               >
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                  />
                 </svg>
               </button>
             </div>
           </div>
-          <p className="text-center text-gray-500 text-xs mt-2">
-            음성 또는 텍스트로 원하는 앱을 설명해주세요
-          </p>
         </div>
       </div>
 
       {/* Settings Modal */}
       {showSettings && (
-        <SettingsModal onClose={() => setShowSettings(false)} />
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          onDeploy={handleDeploy}
+          canDeploy={!!generatedProject && !deployResult}
+          isDeploying={isDeploying}
+        />
       )}
     </div>
   )
 }
 
-function SettingsModal({ onClose }: { onClose: () => void }) {
+function SettingsModal({
+  onClose,
+  onDeploy,
+  canDeploy,
+  isDeploying,
+}: {
+  onClose: () => void
+  onDeploy: (githubToken: string, vercelToken: string) => void
+  canDeploy: boolean
+  isDeploying: boolean
+}) {
   const [githubToken, setGithubToken] = useState('')
   const [vercelToken, setVercelToken] = useState('')
-  const [saving, setSaving] = useState(false)
-
-  const handleSave = () => {
-    setSaving(true)
-    // TODO: Save tokens to database
-    setTimeout(() => {
-      setSaving(false)
-      onClose()
-    }, 1000)
-  }
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
@@ -256,8 +482,12 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               placeholder="ghp_xxxxxxxxxxxx"
             />
             <p className="text-xs text-gray-500 mt-1">
-              <a href="https://github.com/settings/tokens" target="_blank" className="text-purple-400 hover:underline">
-                GitHub에서 토큰 생성하기 →
+              <a
+                href="https://github.com/settings/tokens/new?scopes=repo&description=Makeit"
+                target="_blank"
+                className="text-purple-400 hover:underline"
+              >
+                GitHub에서 토큰 생성하기 → (repo 권한 필요)
               </a>
             </p>
           </div>
@@ -274,7 +504,11 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
               placeholder="xxxxxxxxxxxxxxxx"
             />
             <p className="text-xs text-gray-500 mt-1">
-              <a href="https://vercel.com/account/tokens" target="_blank" className="text-purple-400 hover:underline">
+              <a
+                href="https://vercel.com/account/tokens"
+                target="_blank"
+                className="text-purple-400 hover:underline"
+              >
                 Vercel에서 토큰 생성하기 →
               </a>
             </p>
@@ -283,26 +517,25 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           <div className="bg-slate-900/50 rounded-lg p-4">
             <h3 className="text-sm font-medium text-white mb-2">🔒 보안 안내</h3>
             <p className="text-xs text-gray-400">
-              토큰은 암호화되어 안전하게 저장됩니다. 
-              우리는 앱 생성과 배포에만 사용하며, 절대 다른 용도로 사용하지 않습니다.
+              토큰은 브라우저에만 저장되고 서버에 전달 후 즉시 삭제됩니다. 절대 다른 용도로 사용하지
+              않습니다.
             </p>
           </div>
         </div>
 
         <div className="p-6 border-t border-slate-700 flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-gray-300 hover:text-white transition"
-          >
-            취소
+          <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white transition">
+            닫기
           </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="px-6 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition disabled:opacity-50"
-          >
-            {saving ? '저장 중...' : '저장'}
-          </button>
+          {canDeploy && (
+            <button
+              onClick={() => onDeploy(githubToken, vercelToken)}
+              disabled={!githubToken || !vercelToken || isDeploying}
+              className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition disabled:opacity-50"
+            >
+              {isDeploying ? '배포 중...' : '🚀 배포하기'}
+            </button>
+          )}
         </div>
       </div>
     </div>
